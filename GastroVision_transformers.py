@@ -219,39 +219,6 @@ class Trainer:
         self.writer.add_scalar("Macro_F1/test", test_metrics["macro_f1"], 0)
 
 
-    def extract_features_attentionmaps(self, image_paths):
-        model = ViTForImageClassification.from_pretrained(
-            "google/vit-base-patch16-224-in21k",
-            output_hidden_states=True,  # Enable hidden states output
-            output_attentions=True, # Enable attention maps output
-            num_labels=self.n_classes
-        ).to(self.device)
-        model.eval()
-
-        if torch.cuda.device_count() > 1:
-            model = nn.DataParallel(model)
-
-        if self.best_model_path is not None:
-            checkpoint = torch.load(self.best_model_path)
-            model.load_state_dict(checkpoint["model_state_dict"])
-            model.to(self.device)
-
-        model.eval()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-        features = []
-        attentions = []
-
-        with torch.no_grad():
-            for image_path in image_paths:
-                image = Image.open(image_path).convert("RGB")
-                inputs = processor(images=image, return_tensors="pt").to(self.device)
-                outputs = model(**inputs)
-                hidden_states = outputs.hidden_states[-1].cpu().numpy()
-                attentions.append(outputs.attentions)
-                features.append(hidden_states)
-
-        return features, attentions
-
     def visualize_features(self, image_paths):
         features = self.extract_features(image_paths)
         attentions = self.extract_attention_maps(image_paths)
@@ -318,7 +285,8 @@ class Trainer:
         image = Image.open(image_path).convert("RGB")
         inputs = processor(images=image, return_tensors="pt").to(self.device)
         outputs = model(**inputs)
-        return outputs.hidden_states[-1]
+        features = outputs.hidden_states[-1]
+        return features
 
 
 def objective(trial):
