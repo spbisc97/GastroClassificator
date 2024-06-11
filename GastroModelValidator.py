@@ -22,12 +22,12 @@ class GastroModelValidator:
     @staticmethod
     def calculate_metrics(outputs, targets):
         metrics = {
-            "micro_precision": mtc.precision_score(outputs, targets, average="micro"),
-            "micro_recall": mtc.recall_score(outputs, targets, average="micro"),
-            "micro_f1": mtc.f1_score(outputs, targets, average="micro"),
-            "macro_precision": mtc.precision_score(outputs, targets, average="macro"),
-            "macro_recall": mtc.recall_score(outputs, targets, average="macro"),
-            "macro_f1": mtc.f1_score(outputs, targets, average="macro"),
+            "micro_precision": mtc.precision_score(outputs, targets, average="micro", zero_division=0),
+            "micro_recall": mtc.recall_score(outputs, targets, average="micro", zero_division=0),
+            "micro_f1": mtc.f1_score(outputs, targets, average="micro", zero_division=0),
+            "macro_precision": mtc.precision_score(outputs, targets, average="macro", zero_division=0),
+            "macro_recall": mtc.recall_score(outputs, targets, average="macro", zero_division=0),
+            "macro_f1": mtc.f1_score(outputs, targets, average="macro", zero_division=0),
             "mcc": mtc.matthews_corrcoef(outputs, targets)
         }
         return metrics
