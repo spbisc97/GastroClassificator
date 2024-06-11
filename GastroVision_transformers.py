@@ -75,6 +75,9 @@ class Trainer:
         logging.info(f"Number of training images: {len(training_dataset)}")
         logging.info(f"Number of validation images: {len(validation_dataset)}")
         logging.info(f"Number of test images: {len(test_dataset)}")
+        
+        self.writer.add_text("Model", "ViTForImageClassification: base model is google/vit-base-patch16-224-in21k")
+
 
         if not os.path.exists(model_path):
             os.makedirs(model_path)
@@ -184,6 +187,10 @@ class Trainer:
             logging.info("-" * 10)
             time_elapsed = time.time() - since
             logging.info(f"Epoch time: {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s")
+            # Calculate and log the training speed
+            training_speed = (time_elapsed % 60) / num_steps if time_elapsed > 0 else 0 # seconds per batch
+            self.writer.add_scalar("Speed/train_per_batch", training_speed, epoch)
+            self.writer.add_scalar("Speed/train_per_epoch", time_elapsed, epoch)
 
             if trial is not None:
                 trial.report(val_metrics["micro_f1"], epoch)
