@@ -3,11 +3,9 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.cuda.amp as amp, torch.cuda.amp.autocast_mode as autocast
-import torch.nn.functional as F
+from torch.cuda.amp import  autocast
 from collections import defaultdict
 from sklearn import metrics as mtc
-from torch import device
 from sklearn.metrics import confusion_matrix, classification_report
 import itertools
 import os
@@ -17,11 +15,11 @@ import os
 
 
 class GastroModelValidator:
-    def __init__(self, model, save_path=None):
-        self.model = model
-        self.save_path = None
-
-    def calculate_metrics(self, outputs, targets):
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def calculate_metrics(outputs, targets):
         metrics = {
             "micro_precision": mtc.precision_score(outputs, targets, average="micro"),
             "micro_recall": mtc.recall_score(outputs, targets, average="micro"),
@@ -33,8 +31,8 @@ class GastroModelValidator:
         }
         return metrics
 
-    def print_metrics(self, metrics, num_steps, save_path=None):
-        save_path = save_path if save_path is not None else self.save_path
+    @staticmethod
+    def print_metrics(metrics, num_steps):
         outputs = []
         for k, v in metrics.items():
             if k in ["dice_coeff", "dice", "bce"]:
@@ -42,21 +40,21 @@ class GastroModelValidator:
             else:
                 outputs.append(f"{k}:{v:.2f}")
         logging.info(", ".join(outputs))
-
-    def training_curve(self, epochs, lossesT, lossesV, save_path=None):
-        save_path = save_path if save_path is not None else self.save_path
+    
+    @staticmethod
+    def training_curve(epochs, lossesT, lossesV, save_path='.'):
         plt.plot(epochs, lossesT, "c", label="Training Loss")
         plt.plot(epochs, lossesV, "m", label="Validation Loss")
         plt.title("Training Curve")
         plt.xlabel("Epochs")
         plt.ylabel("Loss")
         plt.legend()
-        save_path = os.join(save_path,"train_val_epoch_curve.png")
+        save_path = os.path.join(save_path,"train_val_epoch_curve.png")
         plt.savefig("train_val_epoch_curve.png")
         plt.close()
 
-    def plot_confusion_matrix(self, cm, classes, normalize=False, title="Confusion matrix", cmap=plt.cm.Blues, plt_size=(10, 10), save_path=None):
-        save_path = save_path if save_path is not None else self.save_path
+    @staticmethod
+    def plot_confusion_matrix( cm, classes, normalize=False, title="Confusion matrix", cmap=plt.cm.Blues, plt_size=(10, 10), save_path='.'):
         plt.rcParams["figure.figsize"] = plt_size
         if normalize:
             cm = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
@@ -81,14 +79,25 @@ class GastroModelValidator:
         plt.tight_layout()
         plt.ylabel("True label")
         plt.xlabel("Predicted label")
-        save_path = os.join(save_path,"confusion_matrix.png")
+        save_path = os.path.join(save_path,"confusion_matrix.png")
         plt.savefig(save_path)
         plt.close()
         return save_path
 
-    def validate_or_test(self, dataloader, is_validate=True):
+
+
+    @staticmethod
+    def validate_or_test(model,dataloader,  validate=True, device="cuda",criterrion=None,save_path='.'):
+        #use negative space programming to check the inputs
+        if criterrion is None:
+            criterrion = torch.nn.CrossEntropyLoss()
+        if device == "cuda":
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if device == "cpu":
+                logging.warning("CUDA is not available, falling back to CPU")
+        model.to(device)
         criterion = torch.nn.CrossEntropyLoss()
-        self.model.eval()
+        model.eval()
         metrics = defaultdict(float)
         num_steps = 0
         total_loss = 0
@@ -99,7 +108,7 @@ class GastroModelValidator:
                 images = images.to(device)
                 labels = labels.to(device)
                 with autocast():
-                    outputs = self.model(images).logits
+                    outputs = model(images).logits
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)
@@ -108,13 +117,11 @@ class GastroModelValidator:
                 all_predictions_d = torch.cat((all_predictions_d, predicted))
         y_true = all_labels_d.cpu()
         y_pred = all_predictions_d.cpu()
-        metrics.update(self.calculate_metrics(y_true, y_pred))
-        if is_validate:
+        metrics.update(GastroModelValidator.calculate_metrics(y_true, y_pred))
+        if not validate:
             cm = confusion_matrix(y_true, y_pred)
             class_names = dataloader.dataset.classes
-            self.plot_confusion_matrix(cm, classes=class_names)
+            GastroModelValidator.plot_confusion_matrix(cm, classes=class_names,save_path=save_path)
             logging.info(classification_report(y_true, y_pred, target_names=class_names))
-        logging.info(f"Accuracy on the {'validation' if is_validate else 'test'} set: {100 * (y_true == y_pred).sum().item() / num_steps:.2f}%")
+        logging.info(f"Accuracy on the {'validation' if validate else 'test'} set: {100 * (y_true == y_pred).sum().item() / num_steps:.2f}%")
         return total_loss / num_steps, metrics, num_steps
-
-
