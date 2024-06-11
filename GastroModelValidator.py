@@ -51,7 +51,7 @@ class GastroModelValidator:
         plt.ylabel("Loss")
         plt.legend()
         save_path = os.path.join(save_path,"train_val_epoch_curve.png")
-        plt.savefig("train_val_epoch_curve.png")
+        plt.savefig(save_path)
         plt.close()
 
     @staticmethod
