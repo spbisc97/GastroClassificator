@@ -26,7 +26,7 @@ validate_or_test = GastroModelValidator.validate_or_test
 torch.backends.cudnn.benchmark = True
 
 class Trainer:
-    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None):
+    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None,pin_memory=True):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.max_epochs = max_epochs
@@ -65,10 +65,12 @@ class Trainer:
         training_dataset = datasets.ImageFolder(train_root_dir, transform=self.trans["train"])
         validation_dataset = datasets.ImageFolder(val_root_dir, transform=self.trans["valid"])
         test_dataset = datasets.ImageFolder(test_root_dir, transform=self.trans["test"])
-
-        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
-        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size)
-        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size)
+        
+        #! pinning memory for faster data loading can also cause memory issues if the system has limited memory, for number of workers shouldn be a problem
+        pin_memory = True if pin_memory else False
+        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=pin_memory)
+        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=4, pin_memory=pin_memory)
+        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size, num_workers=4, pin_memory=pin_memory)
 
         logging.info(f"Number of training images: {len(training_dataset)}")
         logging.info(f"Number of validation images: {len(validation_dataset)}")
@@ -319,6 +321,9 @@ class Trainer:
         return outputs.hidden_states[-1]
 
 
+def objective(trial):
+    trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path="./models/")
+    return trainer.train_model(trial, max_epochs=8)  # Shorter training for hyperparameter tuning
 
 
 if __name__ == "__main__":
