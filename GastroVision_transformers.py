@@ -7,165 +7,68 @@ from PIL import Image
 import os
 import logging
 import csv
-from collections import defaultdict
-import numpy as np
 from torchvision import datasets, transforms
-import sklearn.metrics as mtc
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
-import itertools
 import optuna
-from transformers import ViTForImageClassification, ViTFeatureExtractor
+from transformers import ViTForImageClassification, ViTImageProcessor, ViTFeatureExtractor # ViTFeatureExtractor will be deprecated in the future
 from torch.cuda.amp import GradScaler, autocast
 
-def calculate_metrics(y_true, y_pred):
-    metrics = {
-        "micro_precision": mtc.precision_score(y_true, y_pred, average="micro"),
-        "micro_recall": mtc.recall_score(y_true, y_pred, average="micro"),
-        "micro_f1": mtc.f1_score(y_true, y_pred, average="micro"),
-        "macro_precision": mtc.precision_score(y_true, y_pred, average="macro"),
-        "macro_recall": mtc.recall_score(y_true, y_pred, average="macro"),
-        "macro_f1": mtc.f1_score(y_true, y_pred, average="macro"),
-        "mcc": mtc.matthews_corrcoef(y_true, y_pred)
-    }
-    return metrics
 
+from GastroModelValidator import GastroModelValidator
 
-def print_metrics(metrics, num_steps):
-    outputs = []
-    for k, v in metrics.items():
-        if k in ["dice_coeff", "dice", "bce"]:
-            outputs.append(f"{k}:{v / num_steps:.4f}")
-        else:
-            outputs.append(f"{k}:{v:.2f}")
-    logging.info(", ".join(outputs))
+calculate_metrics = GastroModelValidator.calculate_metrics
+print_metrics = GastroModelValidator.print_metrics
+training_curve = GastroModelValidator.training_curve
+plot_confusion_matrix = GastroModelValidator.plot_confusion_matrix
+validate_or_test = GastroModelValidator.validate_or_test
 
-
-def training_curve(epochs, lossesT, lossesV):
-    plt.plot(epochs, lossesT, "c", label="Training Loss")
-    plt.plot(epochs, lossesV, "m", label="Validation Loss")
-    plt.title("Training Curve")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.savefig("train_val_epoch_curve.png")
-    plt.close()
-
-
-def plot_confusion_matrix(cm, classes, normalize=False, title="Confusion matrix", cmap=plt.cm.Blues, plt_size=(10, 10)):
-    plt.rcParams["figure.figsize"] = plt_size
-    if normalize:
-        cm = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
-        logging.info("Normalized confusion matrix")
-    else:
-        logging.info("Confusion matrix, without normalization")
-    
-    logging.info(cm)
-    
-    plt.imshow(cm, interpolation="nearest", cmap=cmap)
-    plt.title(title)
-    plt.colorbar()
-    tick_marks = np.arange(len(classes))
-    plt.xticks(tick_marks, classes, rotation=90)
-    plt.yticks(tick_marks, classes)
-
-    fmt = ".2f" if normalize else "d"
-    thresh = cm.max() / 2.0
-    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        plt.text(j, i, format(cm[i, j], fmt),
-                 horizontalalignment="center",
-                 color="white" if cm[i, j] > thresh else "black")
-
-    plt.tight_layout()
-    plt.ylabel("True label")
-    plt.xlabel("Predicted label")
-
-    # Save the confusion matrix to a temporary file and return the path
-    temp_path = "confusion_matrix.png"
-    plt.savefig(temp_path)
-    plt.close()
-    return temp_path
-
-
-def validate_or_test(model, data_loader, device, criterion, phase="validation"):
-    model.eval()
-    metrics = defaultdict(float)
-    num_steps = 0
-    total_loss = 0
-    all_labels_d = torch.tensor([], dtype=torch.long).to(device)
-    all_predictions_d = torch.tensor([], dtype=torch.long).to(device)
-
-    with torch.no_grad():
-        for images, labels in data_loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            with autocast():
-                outputs = model(images).logits
-                loss = criterion(outputs, labels)
-            total_loss += loss.item() * images.size(0)
-            num_steps += images.size(0)
-
-            _, predicted = torch.max(outputs, 1)
-            all_labels_d = torch.cat((all_labels_d, labels))
-            all_predictions_d = torch.cat((all_predictions_d, predicted))
-
-    y_true = all_labels_d.cpu()
-    y_pred = all_predictions_d.cpu()
-
-    metrics.update(calculate_metrics(y_true, y_pred))
-
-    if phase == "test":
-        cm = confusion_matrix(y_true, y_pred)
-        class_names = data_loader.dataset.classes
-        plot_confusion_matrix(cm, classes=class_names)
-        logging.info(classification_report(y_true, y_pred, target_names=class_names))
-        logging.info(f"Accuracy on the test set: {100 * (y_true == y_pred).sum().item() / num_steps:.2f}%")
-
-    return total_loss / num_steps, metrics, num_steps
-
+torch.backends.cudnn.benchmark = True
 
 class Trainer:
-    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22):
+    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.max_epochs = max_epochs
         self.lr = lr
         self.n_classes = n_classes
         self.model_path = model_path
-        self.best_model_path = None
+        self.best_model_path = best_model_path
+                
         self.val_f1_max = 0.0
         self.writer = SummaryWriter()  # TensorBoard writer
-        self.scaler = GradScaler()  # For mixed precision training
+        self.scaler = GradScaler()
+        
 
-        feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224-in21k")
-        trans = {
+        self.feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224-in21k")  # we could also use the ViTImageProcessor
+        self.trans = {
             "train": transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.RandomResizedCrop(224, scale=(0.8, 1.2), ratio=(0.75, 1.33)),  # Added stretch
                 transforms.RandomRotation(15),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
+                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ]),
             "valid": transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
+                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ]),
             "test": transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
+                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ])
         }
 
-        training_dataset = datasets.ImageFolder(train_root_dir, transform=trans["train"])
-        validation_dataset = datasets.ImageFolder(val_root_dir, transform=trans["valid"])
-        test_dataset = datasets.ImageFolder(test_root_dir, transform=trans["test"])
+        training_dataset = datasets.ImageFolder(train_root_dir, transform=self.trans["train"])
+        validation_dataset = datasets.ImageFolder(val_root_dir, transform=self.trans["valid"])
+        test_dataset = datasets.ImageFolder(test_root_dir, transform=self.trans["test"])
 
-        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
-        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
+        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
+        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size)
+        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size)
 
         logging.info(f"Number of training images: {len(training_dataset)}")
         logging.info(f"Number of validation images: {len(validation_dataset)}")
@@ -174,7 +77,9 @@ class Trainer:
         if not os.path.exists(model_path):
             os.makedirs(model_path)
 
-    def train_model(self, trial=None):
+    def train_model(self, trial=None, max_epochs=None):
+        if max_epochs is None:
+            max_epochs = self.max_epochs
         lr = self.lr if trial is None else trial.suggest_float('lr', 1e-5, 1e-1, log=True)
         weight_decay = 1e-4 if trial is None else trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
         
@@ -191,8 +96,8 @@ class Trainer:
         lossesT = []
         lossesV = []
 
-        for epoch in range(self.max_epochs):
-            logging.info(f"Epoch {epoch + 1}/{self.max_epochs}")
+        for epoch in range(max_epochs):
+            logging.info(f"Epoch {epoch + 1}/{max_epochs}")
             logging.info("-" * 10)
 
             since = time.time()
@@ -220,18 +125,17 @@ class Trainer:
                 all_labels_d = torch.cat((all_labels_d, labels))
                 all_predictions_d = torch.cat((all_predictions_d, predicted))
 
-                if step % 10 == 0:  # Every 10 steps
-                    y_true = all_labels_d.cpu()
-                    y_pred = all_predictions_d.cpu()
-                    cm = confusion_matrix(y_true, y_pred)
-                    class_names = self.training_loader.dataset.classes
-                    cm_path = plot_confusion_matrix(cm, classes=class_names)
-                    # Read the image and convert it to a format suitable for TensorBoard
-                    image = plt.imread(cm_path)
-                    self.writer.add_image("Confusion Matrix", image.transpose(2, 0, 1), epoch * len(self.training_loader) + step)
-
             y_true = all_labels_d.cpu()
             y_pred = all_predictions_d.cpu()
+            
+            if True:
+                cm = confusion_matrix(y_true, y_pred)
+                class_names = self.training_loader.dataset.classes
+                cm_path = plot_confusion_matrix(cm=cm, classes=class_names,save_path=self.model_path)
+                # Read the image and convert it to a format suitable for TensorBoard
+                image = plt.imread(cm_path)
+                self.writer.add_image("Confusion Matrix", image.transpose(2, 0, 1), epoch * len(self.training_loader) + step)
+                
 
             train_metrics = calculate_metrics(y_true, y_pred)
             train_metrics["loss"] = train_loss / num_steps
@@ -242,7 +146,7 @@ class Trainer:
             self.writer.add_scalar("Macro_F1/train", train_metrics["macro_f1"], epoch)
 
             model.eval()
-            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, self.device, criterion, phase="validation")
+            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, device=self.device, criterrion=criterion, validate=True)
             scheduler.step(val_loss)
 
             self.writer.add_scalar("Loss/validation", val_loss, epoch)
@@ -285,7 +189,7 @@ class Trainer:
                     raise optuna.exceptions.TrialPruned()
 
         if trial is None:
-            training_curve(epochs, lossesT, lossesV)
+            training_curve(epochs, lossesT, lossesV, save_path=self.model_path)
         return val_metrics["micro_f1"]
 
     def test_model(self):
@@ -300,7 +204,7 @@ class Trainer:
         model.to(self.device)
 
         criterion = nn.CrossEntropyLoss()
-        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, self.device, criterion, phase="test")
+        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, device=self.device, criterrion=criterion, validate=False, save_path=self.model_path)
         print_metrics(test_metrics, test_num_steps)
 
         with open(self.model_path + "test_results.csv", "a", newline="") as f:
@@ -313,26 +217,133 @@ class Trainer:
         self.writer.add_scalar("Macro_F1/test", test_metrics["macro_f1"], 0)
 
 
-def objective(trial):
-    trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path="./models/")
-    return trainer.train_model(trial)
+    def extract_features_attentionmaps(self, image_paths):
+        model = ViTForImageClassification.from_pretrained(
+            "google/vit-base-patch16-224-in21k",
+            output_hidden_states=True,  # Enable hidden states output
+            output_attentions=True, # Enable attention maps output
+            num_labels=self.n_classes
+        ).to(self.device)
+        model.eval()
+
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+
+        if self.best_model_path is not None:
+            checkpoint = torch.load(self.best_model_path)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.to(self.device)
+
+        model.eval()
+        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        features = []
+        attentions = []
+
+        with torch.no_grad():
+            for image_path in image_paths:
+                image = Image.open(image_path).convert("RGB")
+                inputs = processor(images=image, return_tensors="pt").to(self.device)
+                outputs = model(**inputs)
+                hidden_states = outputs.hidden_states[-1].cpu().numpy()
+                attentions.append(outputs.attentions)
+                features.append(hidden_states)
+
+        return features, attentions
+
+    def visualize_features(self, image_paths):
+        features = self.extract_features(image_paths)
+        attentions = self.extract_attention_maps(image_paths)
+        
+        # for i, image_path in enumerate(image_paths):
+        #     image = Image.open(image_path)
+        #     plt.imshow(image)
+        #     plt.title(f"Image {i + 1}")
+        #     plt.show()
+            
+        #     for j, feature_map in enumerate(features[i]):
+        #         plt.imshow(feature_map[0], cmap="viridis")
+        #         plt.title(f"Feature map {j + 1}")
+        #         plt.show()
+                
+        #     for j, attention_map in enumerate(attentions[i]):
+        #         for layer, attention in enumerate(attention_map):
+        #             plt.imshow(attention[0].mean(dim=0).cpu().numpy(), cmap="viridis")
+        #             plt.title(f"Attention map {j + 1}, Layer {layer + 1}")
+        #             plt.show()
+        return features, attentions
+
+        
+        
+    # return the best model already trained as a model object
+    def get_best_model(self):
+        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,output_attentions=True).to(self.device)
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+        checkpoint = torch.load(self.best_model_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return model
+    
+    def predict(self, image_path,attentions=False,features=False,return_all=False,return_class=False):
+        model = self.get_best_model()
+        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        # use the test transform
+        image = Image.open(image_path).convert("RGB")
+        inputs = processor(images=image, return_tensors="pt").to(self.device)
+        outputs = model(**inputs)
+        if return_all:
+            return outputs
+        if attentions:
+            return outputs.attentions
+        elif features:
+            return outputs.hidden_states[-1]
+        elif return_class:
+            index= torch.argmax(outputs.logits).item()
+            return self.test_loader.dataset.classes[index]
+        else:
+            return outputs.logits
+        
+    def get_attention_maps(self,image_path):
+        model = self.get_best_model()
+        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        image = Image.open(image_path).convert("RGB")
+        inputs = processor(images=image, return_tensors="pt").to(self.device)
+        outputs = model(**inputs)
+        return outputs.attentions
+    
+    def extract_features(self,image_path):
+        model = self.get_best_model()
+        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        image = Image.open(image_path).convert("RGB")
+        inputs = processor(images=image, return_tensors="pt").to(self.device)
+        outputs = model(**inputs)
+        return outputs.hidden_states[-1]
+
+
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     # study = optuna.create_study(direction="maximize")
-    # study.optimize(objective, n_trials=50)
+    # study.optimize(objective, n_trials=2)
 
     # logging.info(f"Best trial: {study.best_trial.value}")
     # logging.info(f"Best hyperparameters: {study.best_trial.params}")
     
     base_model_path = "./models/"
     date= time.strftime("%Y%m%d-%H%M%S")
-    
     model_path= base_model_path + date + "/"
 
     best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path)
     # best_trainer.lr = study.best_trial.params['lr']
-    best_trainer.train_model()
+    best_trainer.train_model(max_epochs=2)  # Full training with the best hyperparameters
     best_trainer.test_model()
+
+    # Extract and visualize features from some sample images
+    sample_image_paths = ["DATASET/TRAIN/Gastric polyps/8db7c737-a2c6-4b82-b2c1-9dfdae1ea194.jpg"]
+    features, attentions = best_trainer.extract_features_attentionmaps(sample_image_paths[0])
+    
+    #keep it open in the terminal and interact with python
+    import code
+    code.interact(local=locals())
+    
