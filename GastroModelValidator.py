@@ -9,6 +9,7 @@ from sklearn import metrics as mtc
 from sklearn.metrics import confusion_matrix, classification_report
 import itertools
 import os
+import torchvision
 
 
 
@@ -108,7 +109,10 @@ class GastroModelValidator:
                 images = images.to(device)
                 labels = labels.to(device)
                 with autocast():
-                    outputs = model(images).logits
+                    if isinstance(model, torch.nn.DataParallel):
+                        outputs = model.module(images).logits
+                    elif isinstance(model, torchvision.models.DenseNet):
+                        outputs = model(images)
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)
