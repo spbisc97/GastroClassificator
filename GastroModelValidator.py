@@ -109,10 +109,11 @@ class GastroModelValidator:
                 images = images.to(device)
                 labels = labels.to(device)
                 with autocast():
-                    if isinstance(model, torch.nn.DataParallel):
-                        outputs = model.module(images).logits
-                    elif isinstance(model, torchvision.models.DenseNet):
+                    #if is an instance of transformers learning model
+                    if isinstance(model, torchvision.models.DenseNet):
                         outputs = model(images)
+                    else:
+                        outputs = model(images)["logits"]    
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)
