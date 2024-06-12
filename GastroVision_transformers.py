@@ -151,7 +151,7 @@ class Trainer:
             self.writer.add_scalar("Macro_F1/train", train_metrics["macro_f1"], epoch)
 
             model.eval()
-            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, device=self.device, criterrion=criterion, validate=True)
+            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, device=self.device, criterion=criterion, validate=True)
             scheduler.step(val_loss)
 
             self.writer.add_scalar("Loss/validation", val_loss, epoch)
@@ -213,7 +213,7 @@ class Trainer:
         model.to(self.device)
 
         criterion = nn.CrossEntropyLoss()
-        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, device=self.device, criterrion=criterion, validate=False, save_path=self.model_path)
+        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, device=self.device, criterion=criterion, validate=False, save_path=self.model_path)
         print_metrics(test_metrics, test_num_steps)
 
         with open(self.model_path + "test_results.csv", "a", newline="") as f:
@@ -321,7 +321,7 @@ if __name__ == "__main__":
 
     # Extract and visualize features from some sample images
     sample_image_paths = ["DATASET/TRAIN/Gastric polyps/8db7c737-a2c6-4b82-b2c1-9dfdae1ea194.jpg"]
-    features, attentions = best_trainer.extract_features_attentionmaps(sample_image_paths[0])
+    features, attentions = best_trainer.extract_features_attentionmaps(sample_image_paths)
     
     #keep it open in the terminal and interact with python
     import code

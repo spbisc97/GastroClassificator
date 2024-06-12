@@ -12,8 +12,7 @@ import os
 import torchvision
 
 
-
-
+# Class to validate the model
 
 class GastroModelValidator:
     def __init__(self):
@@ -88,10 +87,10 @@ class GastroModelValidator:
 
 
     @staticmethod
-    def validate_or_test(model,dataloader,  validate=True, device="cuda",criterrion=None,save_path='.'):
+    def validate_or_test(model,dataloader,  validate=True, device="cuda",criterion=None,save_path='.'):
         #use negative space programming to check the inputs
-        if criterrion is None:
-            criterrion = torch.nn.CrossEntropyLoss()
+        if criterion is None:
+            criterion = torch.nn.CrossEntropyLoss()
         if device == "cuda":
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             if device == "cpu":
@@ -112,6 +111,9 @@ class GastroModelValidator:
                     #if is an instance of transformers learning model
                     if isinstance(model, torchvision.models.DenseNet):
                         outputs = model(images)
+                    #check if is an instance of custom vit model
+                    if isinstance(model, torch.nn.Module):
+                        outputs, attentions, hidden_states = model(images)
                     else:
                         outputs = model(images)["logits"]    
                     loss = criterion(outputs, labels)
