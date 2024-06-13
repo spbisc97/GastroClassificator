@@ -111,11 +111,8 @@ class GastroModelValidator:
                     #if is an instance of transformers learning model
                     if isinstance(model, torchvision.models.DenseNet):
                         outputs = model(images)
-                    #check if is an instance of custom vit model
-                    if isinstance(model, torch.nn.Module):
-                        outputs, attentions, hidden_states = model(images)
                     else:
-                        outputs = model(images)["logits"]    
+                        outputs = model(images).logits
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)
@@ -129,6 +126,6 @@ class GastroModelValidator:
             cm = confusion_matrix(y_true, y_pred)
             class_names = dataloader.dataset.classes
             GastroModelValidator.plot_confusion_matrix(cm, classes=class_names,save_path=save_path)
-            logging.info(classification_report(y_true, y_pred, target_names=class_names))
+            logging.info(classification_report(y_true, y_pred, target_names=class_names,zero_division=0))
         logging.info(f"Accuracy on the {'validation' if validate else 'test'} set: {100 * (y_true == y_pred).sum().item() / num_steps:.2f}%")
         return total_loss / num_steps, metrics, num_steps
