@@ -15,6 +15,7 @@ from transformers import ViTForImageClassification, ViTImageProcessor, ViTFeatur
 from torch.cuda.amp import GradScaler, autocast
 
 
+# Import the class from the other file in the same directory
 from GastroModelValidator import GastroModelValidator
 
 calculate_metrics = GastroModelValidator.calculate_metrics
@@ -26,7 +27,7 @@ validate_or_test = GastroModelValidator.validate_or_test
 torch.backends.cudnn.benchmark = True
 
 class Trainer:
-    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None,pin_memory=True):
+    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None,pin_memory=True,num_workers=4):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.max_epochs = max_epochs
@@ -38,6 +39,21 @@ class Trainer:
         self.val_f1_max = 0.0
         self.writer = SummaryWriter()  # TensorBoard writer
         self.scaler = GradScaler()
+        #if on colb use 1 worker
+        #if on local use 4 workers
+        
+        if torch.cuda.is_available():
+            logging.info(f"Device: {self.device}")
+            logging.info(f"Number of GPUs: {torch.cuda.device_count()}")
+        else:
+            logging.info(f"Device: {self.device}")
+        
+        # check if im on colaboratory and set the number of workers to 1
+        # if 'google.colab' in str(get_ipython()): 
+        #     logging.info("Running on Google Colab")
+        #     pin_memory = False
+        #     num_workers = 1
+
         
 
         self.feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224-in21k")  # we could also use the ViTImageProcessor
@@ -68,9 +84,9 @@ class Trainer:
         
         #! pinning memory for faster data loading can also cause memory issues if the system has limited memory, for number of workers shouldn be a problem
         pin_memory = True if pin_memory else False
-        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=pin_memory)
-        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=4, pin_memory=pin_memory)
-        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size, num_workers=4, pin_memory=pin_memory)
+        self.training_loader = data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+        self.validation_loader = data.DataLoader(validation_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
+        self.test_loader = data.DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
         logging.info(f"Number of training images: {len(training_dataset)}")
         logging.info(f"Number of validation images: {len(validation_dataset)}")
@@ -92,9 +108,18 @@ class Trainer:
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)  # DataParallel for using multiple GPUs
-
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=4, verbose=True)
+        optimizer_type = 'Adam' if trial is None else trial.suggest_categorical('optimizer', ['Adam', 'SGD', 'AdamW'])
+        self.writer.add_text("Optimizer", optimizer_type)
+        if optimizer_type == 'Adam':
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=4, verbose=True) # ReduceLROnPlateau scheduler. is not possible to use optim.get_lr() with this scheduler        elif optimizer is 'SGD':
+        elif optimizer_type == 'SGD':
+            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+        elif optimizer_type == 'AdamW':
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)            
+            
         criterion = nn.CrossEntropyLoss()
 
         epochs = []
