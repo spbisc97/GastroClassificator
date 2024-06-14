@@ -11,7 +11,6 @@ from torchvision import datasets, transforms
 from sklearn.metrics import confusion_matrix, classification_report
 import matplotlib.pyplot as plt
 import optuna
-from transformers import ViTModel, ViTConfig, ViTImageProcessor
 from torch.cuda.amp import GradScaler, autocast
 
 from GastroModelValidator import GastroModelValidator
@@ -22,26 +21,30 @@ training_curve = GastroModelValidator.training_curve
 plot_confusion_matrix = GastroModelValidator.plot_confusion_matrix
 validate_or_test = GastroModelValidator.validate_or_test
 
+import os
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 torch.backends.cudnn.benchmark = True
 
-class CustomViT(nn.Module):
+class CustomDINOv2(nn.Module):
     def __init__(self, num_labels):
-        super(CustomViT, self).__init__()
-        self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224-in21k", output_attentions=True, output_hidden_states=True)
+        super(CustomDINOv2, self).__init__()
+        self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)  # Load pretrained DINOv2 model
         self.classifier = nn.Sequential(
-            nn.Linear(self.vit.config.hidden_size, num_labels),
+            nn.Linear(384, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_labels),
             nn.LogSoftmax(dim=1)
         )
 
     def forward(self, x):
-        outputs = self.vit(x)
-        hidden_states = outputs.last_hidden_state[:, 0]  # Use the representation of the [CLS] token
-        logits = self.classifier(hidden_states)
-        return logits, outputs.attentions, outputs.hidden_states
+        features = self.dino(x)
+        logits = self.classifier(features)
+        return logits, features
 
 
 class Trainer:
-    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22, best_model_path=None, pin_memory=True):
+    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=16, max_epochs=150, lr=0.0001, n_classes=22, best_model_path=None, pin_memory=True):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.max_epochs = max_epochs
@@ -54,7 +57,6 @@ class Trainer:
         self.writer = SummaryWriter()  # TensorBoard writer
         self.scaler = GradScaler()
 
-        self.feature_extractor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
         self.trans = {
             "train": transforms.Compose([
                 transforms.Resize((224, 224)),
@@ -62,17 +64,17 @@ class Trainer:
                 transforms.RandomRotation(15),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ]),
             "valid": transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ]),
             "test": transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
         }
 
@@ -88,19 +90,25 @@ class Trainer:
         logging.info(f"Number of validation images: {len(validation_dataset)}")
         logging.info(f"Number of test images: {len(test_dataset)}")
 
-        self.writer.add_text("Model", "CustomViT")
+        self.writer.add_text("Model", "CustomDINOv2")
 
         if not os.path.exists(model_path):
             os.makedirs(model_path)
 
-    def train_model(self, trial=None, max_epochs=None):
+    def train_model(self, trial=None, max_epochs=None, continue_best=False):
         if max_epochs is None:
             max_epochs = self.max_epochs
         lr = self.lr if trial is None else trial.suggest_float('lr', 1e-5, 1e-1, log=True)
         weight_decay = 1e-4 if trial is None else trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
         
-        model = CustomViT(num_labels=self.n_classes).to(self.device)
-
+        if continue_best and self.best_model_path is not None:
+            model = CustomDINOv2(num_labels=self.n_classes).to(self.device)
+            checkpoint = torch.load(self.best_model_path)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.to(self.device)
+        else:
+            model = CustomDINOv2(num_labels=self.n_classes).to(self.device)
+            
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)  # DataParallel for using multiple GPUs
 
@@ -127,13 +135,11 @@ class Trainer:
                 images, labels = images.to(self.device), labels.to(self.device)
                 optimizer.zero_grad()
 
-                with autocast():
-                    logits, attentions, hidden_states = model(images)
-                    loss = criterion(logits, labels)
+                logits, features = model(images)
+                loss = criterion(logits, labels)
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                loss.backward()
+                optimizer.step()
 
                 train_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)
@@ -213,7 +219,7 @@ class Trainer:
 
     def test_model(self):
         logging.info(f"Best model path: {self.best_model_path}")
-        model = CustomViT(num_labels=self.n_classes).to(self.device)
+        model = CustomDINOv2(num_labels=self.n_classes).to(self.device)
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
@@ -236,7 +242,7 @@ class Trainer:
         self.writer.add_scalar("Macro_F1/test", test_metrics["macro_f1"], 0)
 
     def extract_features_attentionmaps(self, image_paths):
-        model = CustomViT(num_labels=self.n_classes).to(self.device)
+        model = CustomDINOv2(num_labels=self.n_classes).to(self.device)
         model.eval()
 
         if torch.cuda.device_count() > 1:
@@ -247,36 +253,32 @@ class Trainer:
             model.load_state_dict(checkpoint["model_state_dict"])
             model.to(self.device)
 
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        processor = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
         features = []
         attentions = []
 
         with torch.no_grad():
             for image_path in image_paths:
                 image = Image.open(image_path).convert("RGB")
-                inputs = processor(images=image, return_tensors="pt").to(self.device)
-                logits, attentions, hidden_states = model(inputs)
+                inputs = processor(image).unsqueeze(0).to(self.device)
+                logits, features = model(inputs)
 
                 # Extract hidden states
-                if hidden_states is not None:
-                    hidden_states = hidden_states[-1].cpu().numpy()
-                    features.append(hidden_states)
+                if features is not None:
+                    features = features.cpu().numpy()
+                    features.append(features)
                 else:
                     logging.warning(f"No hidden states available for {image_path}")
                     features.append(None)
 
-                # Extract attention maps
-                if attentions is not None:
-                    attention_maps = attentions[-1].cpu().numpy()  # Get the attention maps from the last layer
-                    attentions.append(attention_maps)
-                else:
-                    logging.warning(f"No attention maps available for {image_path}")
-                    attentions.append(None)
-
-        return features, attentions
+        return features, None
 
     def visualize_features(self, image_paths):
-        features, attentions = self.extract_features_attentionmaps(image_paths)
+        features, _ = self.extract_features_attentionmaps(image_paths)
 
         for i, image_path in enumerate(image_paths):
             image = Image.open(image_path)
@@ -295,61 +297,44 @@ class Trainer:
             else:
                 logging.warning(f"No hidden states available for visualization for {image_path}")
 
-            # Visualize attention maps
-            if attentions[i] is not None:
-                for j, attention_map in enumerate(attentions[i]):
-                    if attention_map.ndim == 4:  # Check if the attention map has the right dimensions
-                        plt.imshow(attention_map[0].mean(axis=0), cmap="viridis")
-                        plt.title(f"Attention map {j + 1}")
-                        plt.show()
-            else:
-                logging.warning(f"No attention maps available for {image_path}")
-
-        return features, attentions
+        return features, None
 
     # Return the best model already trained as a model object
     def get_best_model(self):
-        model = CustomViT(num_labels=self.n_classes).to(self.device)
+        model = CustomDINOv2(num_labels=self.n_classes).to(self.device)
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
         checkpoint = torch.load(self.best_model_path)
         model.load_state_dict(checkpoint["model_state_dict"])
         return model
 
-    def predict(self, image_path, attentions=False, features=False, return_all=False, return_class=False):
+    def predict(self, image_path, return_class=False):
         model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-        # Use the test transform
+        processor = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
         image = Image.open(image_path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt").to(self.device)
-        logits, attentions, hidden_states = model(inputs)
-        if return_all:
-            return logits, attentions, hidden_states
-        if attentions:
-            return attentions
-        elif features:
-            return hidden_states[-1]
-        elif return_class:
+        inputs = processor(image).unsqueeze(0).to(self.device)
+        logits, _ = model(inputs)
+        if return_class:
             index = torch.argmax(logits).item()
             return self.test_loader.dataset.classes[index]
         else:
             return logits
 
-    def get_attention_maps(self, image_path):
-        model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-        image = Image.open(image_path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt").to(self.device)
-        logits, attentions, hidden_states = model(inputs)
-        return attentions
-
     def extract_features(self, image_path):
         model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        processor = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
         image = Image.open(image_path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt").to(self.device)
-        logits, attentions, hidden_states = model(inputs)
-        features = hidden_states[-1]
+        inputs = processor(image).unsqueeze(0).to(self.device)
+        _, features = model(inputs)
+        features = features.cpu().numpy()
         return features
 
 
@@ -370,15 +355,13 @@ if __name__ == "__main__":
     base_model_path = "./models/"
     date = time.strftime("%Y%m%d-%H%M%S")
     model_path = base_model_path + date + "/"
+    
 
-    best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path)
+    best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path,batch_size=32,best_model_path='models/20240614-232758/best_model_epoch_13.pth')
     # best_trainer.lr = study.best_trial.params['lr']
-    best_trainer.train_model(max_epochs=1)  # Full training with the best hyperparameters
+    best_trainer.train_model(max_epochs=15,continue_best=True)  # Full training with the best hyperparameters
     best_trainer.test_model()
 
-    # Extract and visualize features from some sample images
-    sample_image_paths = ["DATASET/TRAIN/Gastric polyps/8db7c737-a2c6-4b82-b2c1-9dfdae1ea194.jpg"]
-    features, attentions = best_trainer.visualize_features(sample_image_paths)
 
     # Keep it open in the terminal and interact with python
     import code
