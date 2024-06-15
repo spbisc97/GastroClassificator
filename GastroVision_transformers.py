@@ -104,7 +104,7 @@ class Trainer:
         lr = self.lr if trial is None else trial.suggest_float('lr', 1e-5, 1e-1, log=True)
         weight_decay = 1e-4 if trial is None else trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
         
-        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes).to(self.device)
+        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,attn_implementation='eager').to(self.device)
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)  # DataParallel for using multiple GPUs
@@ -176,7 +176,7 @@ class Trainer:
             self.writer.add_scalar("Macro_F1/train", train_metrics["macro_f1"], epoch)
 
             model.eval()
-            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, device=self.device, criterion=criterion, validate=True)
+            val_loss, val_metrics, val_num_steps = validate_or_test(model, self.validation_loader, device=self.device, criterion=criterion, validate=True,VIT_model='ViTForImageClassification')
             scheduler.step(val_loss)
 
             self.writer.add_scalar("Loss/validation", val_loss, epoch)
@@ -228,7 +228,7 @@ class Trainer:
 
     def test_model(self):
         logging.info(f"Best model path: {self.best_model_path}")
-        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes).to(self.device)
+        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,attn_implementation="eager").to(self.device)
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
@@ -238,7 +238,7 @@ class Trainer:
         model.to(self.device)
 
         criterion = nn.CrossEntropyLoss()
-        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, device=self.device, criterion=criterion, validate=False, save_path=self.model_path)
+        test_loss, test_metrics, test_num_steps = validate_or_test(model, self.test_loader, device=self.device, criterion=criterion, validate=False, save_path=self.model_path,VIT_model='ViTForImageClassification')
         print_metrics(test_metrics, test_num_steps)
 
         with open(self.model_path + "test_results.csv", "a", newline="") as f:
@@ -253,24 +253,24 @@ class Trainer:
 
     def visualize_features(self, image_paths):
         features = self.extract_features(image_paths)
-        attentions = self.extract_attention_maps(image_paths)
+        attentions = self.get_attention_maps(image_paths)
         
-        # for i, image_path in enumerate(image_paths):
-        #     image = Image.open(image_path)
-        #     plt.imshow(image)
-        #     plt.title(f"Image {i + 1}")
-        #     plt.show()
+        for i, image_path in enumerate(image_paths):
+            image = Image.open(image_path)
+            plt.imshow(image)
+            plt.title(f"Image {i + 1}")
+            plt.show()
             
-        #     for j, feature_map in enumerate(features[i]):
-        #         plt.imshow(feature_map[0], cmap="viridis")
-        #         plt.title(f"Feature map {j + 1}")
-        #         plt.show()
+            for j, feature_map in enumerate(features[i]):
+                plt.imshow(feature_map[0], cmap="viridis")
+                plt.title(f"Feature map {j + 1}")
+                plt.show()
                 
-        #     for j, attention_map in enumerate(attentions[i]):
-        #         for layer, attention in enumerate(attention_map):
-        #             plt.imshow(attention[0].mean(dim=0).cpu().numpy(), cmap="viridis")
-        #             plt.title(f"Attention map {j + 1}, Layer {layer + 1}")
-        #             plt.show()
+            for j, attention_map in enumerate(attentions[i]):
+                for layer, attention in enumerate(attention_map):
+                    plt.imshow(attention[0].mean(dim=0).cpu().numpy(), cmap="viridis")
+                    plt.title(f"Attention map {j + 1}, Layer {layer + 1}")
+                    plt.show()
         return features, attentions
 
         
@@ -308,7 +308,7 @@ class Trainer:
         processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
         image = Image.open(image_path).convert("RGB")
         inputs = processor(images=image, return_tensors="pt").to(self.device)
-        outputs = model(**inputs)
+        outputs = model(**inputs, output_attentions=True)
         return outputs.attentions
     
     def extract_features(self,image_path):
@@ -341,12 +341,12 @@ if __name__ == "__main__":
 
     best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path)
     # best_trainer.lr = study.best_trial.params['lr']
-    best_trainer.train_model(max_epochs=2)  # Full training with the best hyperparameters
+    best_trainer.train_model(max_epochs=1)  # Full training with the best hyperparameters
     best_trainer.test_model()
 
-    # Extract and visualize features from some sample images
-    sample_image_paths = ["DATASET/TRAIN/Gastric polyps/8db7c737-a2c6-4b82-b2c1-9dfdae1ea194.jpg"]
-    features, attentions = best_trainer.extract_features_attentionmaps(sample_image_paths)
+    # # Extract and visualize features from some sample images
+    # sample_image_paths = ["DATASET/TRAIN/Gastric polyps/8db7c737-a2c6-4b82-b2c1-9dfdae1ea194.jpg"]
+    # features, attentions = best_trainer.extract_features_attentionmaps(sample_image_paths)
     
     #keep it open in the terminal and interact with python
     import code

@@ -87,8 +87,9 @@ class GastroModelValidator:
 
 
     @staticmethod
-    def validate_or_test(model,dataloader,  validate=True, device="cuda",criterion=None,save_path='.'):
+    def validate_or_test(model,dataloader,  validate=True, device="cuda",criterion=None,save_path='.',VIT_model=None): #ViT model : vit-base-patch16-224,dino_vit
         #use negative space programming to check the inputs
+        ViTModels = ['vit-base-patch16-224','dino_vit','vittorchvision','ViTForImageClassificationCustom','ViTForImageClassification']
         if criterion is None:
             criterion = torch.nn.CrossEntropyLoss()
         if device == "cuda":
@@ -109,10 +110,23 @@ class GastroModelValidator:
                 labels = labels.to(device)
                 with autocast():
                     #if is an instance of transformers learning model
-                    if isinstance(model, torchvision.models.DenseNet):
-                        outputs = model(images)
+                    if VIT_model is not None:
+                        if VIT_model in ViTModels:
+                            if VIT_model == 'vit-base-patch16-224':
+                                outputs,_ = model(images)
+                            if VIT_model == 'vittorchvision':
+                                outputs,_ = model(images)
+                            elif VIT_model == 'dino_vit':
+                                outputs = model(images)
+                            elif VIT_model == 'ViTForImageClassificationCustom':
+                                outputs = model(images).logits
+                            elif VIT_model == 'ViTForImageClassification':
+                                outputs = model(images).logits
+                        else:
+                            logging.error("Please provide a valid ViT model")
+                            return
                     else:
-                        outputs = model(images).logits
+                        outputs = model(images)
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * images.size(0)
                 num_steps += images.size(0)

@@ -11,7 +11,7 @@ from torchvision import datasets, transforms
 from sklearn.metrics import confusion_matrix, classification_report
 import matplotlib.pyplot as plt
 import optuna
-from torch.cuda.amp import GradScaler, autocast
+import numpy as np
 
 from GastroModelValidator import GastroModelValidator
 
@@ -21,9 +21,6 @@ training_curve = GastroModelValidator.training_curve
 plot_confusion_matrix = GastroModelValidator.plot_confusion_matrix
 validate_or_test = GastroModelValidator.validate_or_test
 
-import os
-
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 torch.backends.cudnn.benchmark = True
 
 class CustomDINOv2(nn.Module):
@@ -31,7 +28,9 @@ class CustomDINOv2(nn.Module):
         super(CustomDINOv2, self).__init__()
         self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)  # Load pretrained DINOv2 model
         self.classifier = nn.Sequential(
-            nn.Linear(384, 256),
+            nn.Linear(384, 3072),
+            nn.ReLU(),
+            nn.Linear(3072, 256),
             nn.ReLU(),
             nn.Linear(256, num_labels),
             nn.LogSoftmax(dim=1)
@@ -42,6 +41,9 @@ class CustomDINOv2(nn.Module):
         logits = self.classifier(features)
         return logits, features
 
+    def get_attention_maps(self, x):
+        attentions = self.dino.get_last_selfattention(x)
+        return attentions
 
 class Trainer:
     def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=16, max_epochs=150, lr=0.0001, n_classes=22, best_model_path=None, pin_memory=True):
@@ -55,7 +57,6 @@ class Trainer:
 
         self.val_f1_max = 0.0
         self.writer = SummaryWriter()  # TensorBoard writer
-        self.scaler = GradScaler()
 
         self.trans = {
             "train": transforms.Compose([
@@ -95,7 +96,7 @@ class Trainer:
         if not os.path.exists(model_path):
             os.makedirs(model_path)
 
-    def train_model(self, trial=None, max_epochs=None, continue_best=False):
+    def train_model(self, trial=None, max_epochs=None, continue_best=True):
         if max_epochs is None:
             max_epochs = self.max_epochs
         lr = self.lr if trial is None else trial.suggest_float('lr', 1e-5, 1e-1, log=True)
@@ -275,10 +276,13 @@ class Trainer:
                     logging.warning(f"No hidden states available for {image_path}")
                     features.append(None)
 
-        return features, None
+                # Extract attention maps
+                attentions.append(model.get_attention_maps(inputs))
+
+        return features, attentions
 
     def visualize_features(self, image_paths):
-        features, _ = self.extract_features_attentionmaps(image_paths)
+        features, attentions = self.extract_features_attentionmaps(image_paths)
 
         for i, image_path in enumerate(image_paths):
             image = Image.open(image_path)
@@ -297,7 +301,20 @@ class Trainer:
             else:
                 logging.warning(f"No hidden states available for visualization for {image_path}")
 
-        return features, None
+            # Visualize attention maps
+            if attentions[i] is not None:
+                for j, attention_map in enumerate(attentions[i]):
+                    attention_map = attention_map.squeeze(0).cpu().numpy()
+                    attention_map = np.mean(attention_map, axis=0)  # Average over the heads
+                    attention_map = attention_map.reshape(14, 14)  # Assuming the attention map is 14x14
+
+                    # Resize the attention map to the size of the image
+                    attention_map = np.kron(attention_map, np.ones((16, 16)))
+                    plt.imshow(attention_map, cmap='viridis', alpha=0.6)
+                    plt.title(f"Attention map {j + 1}")
+                    plt.show()
+
+        return features, attentions
 
     # Return the best model already trained as a model object
     def get_best_model(self):
@@ -359,7 +376,7 @@ if __name__ == "__main__":
 
     best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path,batch_size=32,best_model_path='models/20240614-232758/best_model_epoch_13.pth')
     # best_trainer.lr = study.best_trial.params['lr']
-    best_trainer.train_model(max_epochs=15,continue_best=True)  # Full training with the best hyperparameters
+    best_trainer.train_model(max_epochs=15,continue_best=False)  # Full training with the best hyperparameters
     best_trainer.test_model()
 
 
