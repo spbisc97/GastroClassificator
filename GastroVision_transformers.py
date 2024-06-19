@@ -26,8 +26,11 @@ validate_or_test = GastroModelValidator.validate_or_test
 
 torch.backends.cudnn.benchmark = True
 
+#write the huggingface token to environment variable to avoid the warning, take it from .env file
+
+
 class Trainer:
-    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None,pin_memory=True,num_workers=4):
+    def __init__(self, train_root_dir, val_root_dir, test_root_dir, model_path, batch_size=32, max_epochs=150, lr=0.0001, n_classes=22,best_model_path=None,pin_memory=True,num_workers=4,model_name=None):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.max_epochs = max_epochs
@@ -35,7 +38,18 @@ class Trainer:
         self.n_classes = n_classes
         self.model_path = model_path
         self.best_model_path = best_model_path
-                
+        # possible models: 'google/vit-base-patch16-224-in21k', 'google/vit-large-patch16-224-in21k',
+        if model_name is None:
+            model_name = 'google/vit-base-patch16-224-in21k'
+        
+        # check if the model name is valid
+        try:
+            ViTForImageClassification.from_pretrained(model_name, num_labels=n_classes,attn_implementation='eager')
+            self.model_name = model_name
+        except ValueError:
+            logging.error("Invalid model name. Using the default model google/vit-base-patch16-224-in21k")
+            self.model_name = 'google/vit-base-patch16-224-in21k'
+    
         self.val_f1_max = 0.0
         self.writer = SummaryWriter()  # TensorBoard writer
         self.scaler = GradScaler()
@@ -55,24 +69,27 @@ class Trainer:
         #     num_workers = 1
 
         
+        
 
-        self.feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224-in21k")  # we could also use the ViTImageProcessor
+        self.feature_extractor = ViTFeatureExtractor.from_pretrained(self.model_name)  # we could also use the ViTImageProcessor
+        self.image_dimention= 224 if '224' in self.model_name else 384
+
         self.trans = {
             "train": transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.RandomResizedCrop(224, scale=(0.8, 1.2), ratio=(0.75, 1.33)),  # Added stretch
+                transforms.Resize(( self.image_dimention , self.image_dimention)),
+                transforms.RandomResizedCrop(self.image_dimention, scale=(0.8, 1.2), ratio=(0.75, 1.33)),  # Added stretch
                 transforms.RandomRotation(15),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ]),
             "valid": transforms.Compose([
-                transforms.Resize((224, 224)),
+                transforms.Resize((self.image_dimention, self.image_dimention)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ]),
             "test": transforms.Compose([
-                transforms.Resize((224, 224)),
+                transforms.Resize((self.image_dimention, self.image_dimention)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=self.feature_extractor.image_mean, std=self.feature_extractor.image_std)
             ])
@@ -92,7 +109,8 @@ class Trainer:
         logging.info(f"Number of validation images: {len(validation_dataset)}")
         logging.info(f"Number of test images: {len(test_dataset)}")
         
-        self.writer.add_text("Model", "ViTForImageClassification: base model is google/vit-base-patch16-224-in21k")
+        logging.info (f"Number of training images: {len(training_dataset)}\nNumber of validation images: {len(validation_dataset)}\nNumber of test images: {len(test_dataset)}")
+        self.writer.add_text("Model",f"ViTForImageClassification: base model is {model_name}")
 
 
         if not os.path.exists(model_path):
@@ -104,7 +122,7 @@ class Trainer:
         lr = self.lr if trial is None else trial.suggest_float('lr', 1e-5, 1e-1, log=True)
         weight_decay = 1e-4 if trial is None else trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
         
-        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,attn_implementation='eager').to(self.device)
+        model = ViTForImageClassification.from_pretrained(self.model_name, num_labels=self.n_classes,attn_implementation='eager').to(self.device)
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)  # DataParallel for using multiple GPUs
@@ -228,7 +246,7 @@ class Trainer:
 
     def test_model(self):
         logging.info(f"Best model path: {self.best_model_path}")
-        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,attn_implementation="eager").to(self.device)
+        model = ViTForImageClassification.from_pretrained(self.model_name, num_labels=self.n_classes,attn_implementation="eager").to(self.device)
 
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
@@ -277,7 +295,7 @@ class Trainer:
         
     # return the best model already trained as a model object
     def get_best_model(self):
-        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224-in21k", num_labels=self.n_classes,output_attentions=True).to(self.device)
+        model = ViTForImageClassification.from_pretrained(self.model_name, num_labels=self.n_classes,attn_implementation="eager").to(self.device)
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
         checkpoint = torch.load(self.best_model_path)
@@ -286,7 +304,7 @@ class Trainer:
     
     def predict(self, image_path,attentions=False,features=False,return_all=False,return_class=False):
         model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        processor = ViTImageProcessor.from_pretrained(self.model_name)
         # use the test transform
         image = Image.open(image_path).convert("RGB")
         inputs = processor(images=image, return_tensors="pt").to(self.device)
@@ -305,7 +323,7 @@ class Trainer:
         
     def get_attention_maps(self,image_path):
         model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        processor = ViTImageProcessor.from_pretrained(self.model_name)
         image = Image.open(image_path).convert("RGB")
         inputs = processor(images=image, return_tensors="pt").to(self.device)
         outputs = model(**inputs, output_attentions=True)
@@ -313,7 +331,7 @@ class Trainer:
     
     def extract_features(self,image_path):
         model = self.get_best_model()
-        processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+        processor = ViTImageProcessor.from_pretrained(self.model_name)
         image = Image.open(image_path).convert("RGB")
         inputs = processor(images=image, return_tensors="pt").to(self.device)
         outputs = model(**inputs)
@@ -339,9 +357,10 @@ if __name__ == "__main__":
     date= time.strftime("%Y%m%d-%H%M%S")
     model_path= base_model_path + date + "/"
 
-    best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path)
+    model_name = 'google/vit-base-patch16-224-in21k'
+    best_trainer = Trainer(train_root_dir="./DATASET/TRAIN", val_root_dir="./DATASET/VAL", test_root_dir="./DATASET/TEST", model_path=model_path,model_name=model_name)
     # best_trainer.lr = study.best_trial.params['lr']
-    best_trainer.train_model(max_epochs=1)  # Full training with the best hyperparameters
+    best_trainer.train_model(max_epochs=15)  # Full training with the best hyperparameters
     best_trainer.test_model()
 
     # # Extract and visualize features from some sample images
