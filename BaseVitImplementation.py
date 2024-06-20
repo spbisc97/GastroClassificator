@@ -12,12 +12,38 @@ import matplotlib.pyplot as plt
 # %matplotlib inline
 from torchvision import transforms, datasets
 import logging
-from torch import nn # if you want to use the nn module for custom classificaiton head
+from torch import nn # if you want to use the nn module for custom classification head
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix
 from sklearn import metrics as mtc
-from transformers import ViTImageProcessor, ViTForImageClassification, TrainingArguments, Trainer
+from transformers import ViTImageProcessor, ViTForImageClassification, TrainingArguments, Trainer, ViTConfig
+# if you want to use custom classification head
+from transformers.modeling_outputs import CausalLMOutput,ImageClassifierOutput
+from torch.cuda.amp import GradScaler, autocast
+# from tqdm import tqdm
+# if using the notebook
+def is_notebook():
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        if shell == "ZMQInteractiveShell":
+            return True  # Jupyter notebook or qtconsole
+        elif shell == "TerminalInteractiveShell":
+            return False  # Terminal running IPython
+        else:
+            return False  # Other type (?)
+    except NameError:
+        return False      # Probably standard Python interpreter
+
+if is_notebook():
+    from tqdm.notebook import tqdm
+else:
+    from tqdm import tqdm
+
+
+
+# from tqdm.notebook import tqdm
 
 # Setting up the logger
 logger = logging.getLogger()
@@ -157,14 +183,13 @@ args = TrainingArguments(
     learning_rate=2e-5,
     per_device_train_batch_size=16,
     per_device_eval_batch_size=16,
-    num_train_epochs=1,
-    weight_decay=0.01,
+    num_train_epochs=10,
+    weight_decay=1e-4,
     load_best_model_at_end=True,
     metric_for_best_model=metric_name,
     logging_dir='./logs',
     logging_steps=30,  # Log every 10 steps
     fp16=True,  # Enable mixed precision training
-    #add custom savings 
 )
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -182,17 +207,80 @@ train_loader = DataLoader(train_dataset, batch_size=args.per_device_train_batch_
 val_loader = DataLoader(val_dataset, batch_size=args.per_device_eval_batch_size, shuffle=False, num_workers=4, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=args.per_device_eval_batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-
-
+# %%
+class CustomViTForImageClassification(ViTForImageClassification):
+    def __init__(self, config: ViTConfig):
+        super().__init__(config)
+        # ... # add more layers if needed
+        # ...
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        
+    def forward(self, pixel_values, labels):
+        outputs = self.vit(pixel_values=pixel_values)
+        # ... # add more layers if needed
+        # ...
+        logits = self.classifier(outputs.last_hidden_state[:, 0])
+        loss = nn.CrossEntropyLoss()(logits, labels)
+        return CausalLMOutput(loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+    
+    
+    
+    
 
 # %%
 # Load the model
-model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224-in21k', num_labels=len(get_labels(train_dataset)))
-
+model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224-in21k', num_labels=len(get_labels(train_dataset)),attn_implementation='eager')
+#model = CustomViTForImageClassification.from_pretrained('google/vit-base-patch16-224-in21k', num_labels=len(get_labels(train_dataset)),attn_implementation='eager')
 # Move the model to the appropriate device
 model.to(device)
 
 # %%
+# Define optimizer and learning rate scheduler for custom training loop
+optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=4) #add verbose=True to see the learning rate change
+
+# Initialize GradScaler for mixed precision training
+scaler = GradScaler()
+
+# Custom training loop
+def custom_train(trainer, model, train_loader,val_loader, optimizer, scheduler, scaler, device):
+    model.train()
+    total_loss = 0
+    global_step = 0
+    for epoch in range(trainer.args.num_train_epochs):
+        for step, (images, labels) in enumerate(tqdm(train_loader)):
+            images, labels = images.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            
+            with autocast():
+                outputs = model(pixel_values=images, labels=labels)
+                loss = outputs.loss
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_loss += loss.item()
+            global_step += 1
+
+            if global_step % trainer.args.logging_steps == 0:
+                avg_loss = total_loss / global_step
+                tqdm.write(f"Step {global_step}, Loss: {avg_loss:.4f}")
+                # logger.info(f"Step {global_step}, Loss: {avg_loss:.4f}") # Uncomment this line if you want to log the loss to the logger
+
+        scheduler.step()
+        avg_loss = total_loss / (epoch + 1)
+        logger.info(f"Epoch {epoch+1}/{trainer.args.num_train_epochs}, Train Loss: {avg_loss:.4f}")
+        
+        # Evaluate the model
+        eval_results = trainer.evaluate(eval_dataset=val_loader.dataset)
+        logger.info(f"Epoch {epoch+1}/{trainer.args.num_train_epochs}, Eval {eval_results}")
+        
+        
+
+
 # Initialize the trainer
 trainer = Trainer(
     model=model,
@@ -200,6 +288,7 @@ trainer = Trainer(
     train_dataset=train_loader.dataset,
     eval_dataset=val_loader.dataset,
     data_collator=custom_collate_fn,
+    # data_collator=lambda x: {"pixel_values": torch.stack([item[0] for item in x]), "labels": torch.tensor([item[1] for item in x])},
     compute_metrics=compute_metrics,
 )
 
@@ -207,7 +296,9 @@ trainer = Trainer(
 
 # %%
 # Train the model
-trainer.train()
+# Train the model using the custom training loop
+custom_train(trainer, model, train_loader, val_loader,optimizer, scheduler, scaler, device)
+# trainer.train()
 
 # %%
 
@@ -230,5 +321,10 @@ logger.info(f"Confusion Matrix:\n{conf_matrix}")
 
 plot_confusion_matrix(conf_matrix, get_labels(test_dataset), normalize=False, title="Normalized Confusion Matrix", figsize=(15, 15),font_size=12)
 
-
+plt.show()
 # %%
+
+#convert to notebook
+# ipynb-py-convert BaseVitImplementation.py BaseVitImplementation.ipynb
+# or the other way around
+# ipynb-py-convert BaseVitImplementation.ipynb BaseVitImplementation.py
